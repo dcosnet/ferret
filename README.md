@@ -6,7 +6,7 @@
 [![Version](https://img.shields.io/badge/version-1.0.0-orange.svg)](#)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 
-![ferret](/home/dcosnet/Desktop/MASTERSONGIT/ferret-audited(16)/ferret/ferret-ss.png)
+![ferret](./ferret-ss.png)
 
 ferret is a desktop video player built on libmpv, with a custom egui overlay UI
 rendered in a transparent always-on-top window. The engine runs on its own
