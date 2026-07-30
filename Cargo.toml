@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mpv-bindings",
+    "crates/player-core",
+    "crates/player-ui",
+    "crates/player-app",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-2.0-or-later"
+authors = ["Jeremy Anderson <jeremy@dcos.net>"]
+repository = "http://git.dcos.net/dcosnet/ferret"
+homepage = "http://git.dcos.net/dcosnet/ferret"
+documentation = "http://git.dcos.net/dcosnet/ferret/blob/master/README.md"
+
+[workspace.dependencies]
+# Internal crates
+mpv-bindings = { path = "crates/mpv-bindings" }
+player-core  = { path = "crates/player-core" }
+player-ui    = { path = "crates/player-ui" }
+
+# FFI / system (we generate our own bindgen output in mpv-bindings/build.rs)
+bindgen    = "0.70"
+pkg-config = "0.3"
+
+# Concurrency
+crossbeam-channel = "0.5"
+crossbeam-utils    = "0.8"
+parking_lot        = "0.12"
+
+# Errors / logging
+anyhow     = "1"
+thiserror  = "1"
+tracing    = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Window / GL
+winit      = { version = "0.30", features = ["x11", "wayland", "rwh_06"] }
+raw-window-handle = "0.6"
+egui       = "0.29"
+egui-wgpu  = "0.29"
+wgpu       = "22"      # pinned to match egui-wgpu 0.29
+pollster   = "0.4"      # lightweight blocking executor for wgpu init
+
+# Misc
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc       = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+opt-level = 1               # wgpu/shaders benefit from at least -O1
+debug = 1

@@ -1,0 +1,27 @@
+[package]
+name = "player-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "ferret video player binary"
+
+[[bin]]
+name = "ferret"
+path = "src/main.rs"
+
+[dependencies]
+player-core  = { workspace = true }
+player-ui    = { workspace = true }
+mpv-bindings = { workspace = true }
+winit        = { workspace = true }
+egui         = { workspace = true }
+egui-wgpu    = { workspace = true }
+wgpu         = { workspace = true }
+raw-window-handle = { workspace = true }
+pollster     = { workspace = true }
+crossbeam-channel = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }

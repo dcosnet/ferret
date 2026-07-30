@@ -1,0 +1,23 @@
+[package]
+name = "player-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Headless video player engine (drives libmpv)"
+
+[lib]
+name = "player_core"
+path = "src/lib.rs"
+
+[dependencies]
+mpv-bindings = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }

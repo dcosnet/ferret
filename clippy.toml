@@ -1,0 +1,32 @@
+# clippy.toml — ferret lint configuration
+#
+# Stricter than defaults. Run: cargo clippy --release -- -D warnings
+
+# Disallow large enum variants without #[allow] — catches accidental
+# memory bloat in hot-path enums like Cmd and EngineEvent.
+enum-variant-size-threshold = 256
+
+# Flag types with too many fields — a code smell for "split this struct".
+# PlaybackState has many fields by design (it's a snapshot), so it carries
+# an explicit #[allow] where needed.
+struct-field-size-threshold = 64
+
+# Single-use bindings are often a sign of "extract this to a named variable
+# for clarity" — but sometimes they're just noise. Keep the lint at warn
+# (default) so we see them without failing the build.
+
+# Long literal strings should be broken across lines for readability —
+# but only flag if the line exceeds 120 chars.
+single-char-binding-names-threshold = 2
+
+# Don't flag `fn main() -> Result<()>` — that's idiomatic for anyhow.
+# (clippy::main_recursion is already allow-by-default.)
+
+# Allow the `?` operator in FFI wrappers — the alternative (explicit match)
+# is more verbose without being clearer for the `MpvError::from_code` pattern.
+# This is a per-crate allow in mpv-bindings, not a global suppression.
+
+# Cognitive complexity threshold — functions above this get flagged.
+# The engine's `apply_cmd` match is intentionally large (one arm per Cmd
+# variant); it carries #[allow(clippy::cognitive_complexity)] if needed.
+cognitive-complexity-threshold = 50
