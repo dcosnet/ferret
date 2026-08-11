@@ -221,13 +221,16 @@ impl FileDialog {
     /// needs to select something first.
     fn confirm(&self) -> Option<FileDialogResult> {
         if self.kind.is_folder() {
-            // Folder select: return the selected directory (or current dir).
+            // Folder select: return the selected directory, or fall back to
+            // the current directory so the user can open the folder they're
+            // already browsing without navigating up first.
             if let Some(sel) = &self.selected {
                 if sel.is_dir() {
                     return Some(FileDialogResult::Path(sel.to_string_lossy().into_owned()));
                 }
             }
-            return None;
+            // No subfolder selected — use the current directory itself.
+            return Some(FileDialogResult::Path(self.current_dir.to_string_lossy().into_owned()));
         }
         if self.kind.is_save() {
             // Save: need a filename.

@@ -2,7 +2,7 @@
 
 use serde::{Serialize, Serializer};
 
-use crate::cmd::LoopMode;
+use crate::cmd::{LoopMode, RandomMode};
 
 /// One mpv track-list entry. Used for both audio and subtitle tracks — they
 /// have the same shape, just different `type` values ("audio" vs "sub").
@@ -101,6 +101,9 @@ pub struct PlaybackState {
     pub marker_b: Option<f64>,
     /// Is A→B loop currently enabled?
     pub marker_loop_enabled: bool,
+
+    /// Current random/shuffle mode. Mirrors the engine's last `SetRandomMode` cmd.
+    pub random_mode: RandomMode,
 }
 
 // Serialize Track for the JSON marker export. We do it manually so the

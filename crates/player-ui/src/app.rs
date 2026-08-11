@@ -26,7 +26,7 @@ use egui::{Color32, Context, Layout, Ui, Vec2};
 
 use player_core::event::EngineEvent;
 use player_core::state::PlaybackState;
-use player_core::{Cmd, LoopMode};
+use player_core::{Cmd, LoopMode, RandomMode};
 
 use crate::icons;
 use crate::theme::Theme;
@@ -571,6 +571,36 @@ impl OverlayApp {
                                     ui.separator();
 
                                     ui.label(
+                                        egui::RichText::new("Random / Shuffle")
+                                            .color(fg_dim).size(10.0).strong(),
+                                    );
+                                    ui.add_space(2.0);
+                                    let random_modes = [
+                                        ("Off", RandomMode::Off),
+                                        ("Same Folder", RandomMode::SameFolder),
+                                        ("Whole Tree", RandomMode::WholeTree),
+                                        ("Step-Aware", RandomMode::StepAware),
+                                    ];
+                                    let random_mode = self.state.random_mode;
+                                    for (label, mode) in random_modes {
+                                        let checked = random_mode == mode;
+                                        if ui.selectable_label(checked, label).clicked() {
+                                            pending_cmds.push(Cmd::SetRandomMode(mode));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                    if ui.button("Random Next  (R)").clicked() {
+                                        pending_cmds.push(Cmd::RandomNext);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Cycle Random Mode  (S)").clicked() {
+                                        pending_cmds.push(Cmd::SetRandomMode(random_mode.cycle()));
+                                        ui.close_menu();
+                                    }
+
+                                    ui.separator();
+
+                                    ui.label(
                                         egui::RichText::new("Speed")
                                             .color(fg_dim).size(10.0).strong(),
                                     );
@@ -719,7 +749,7 @@ impl OverlayApp {
                                     }
                                     ui.separator();
                                     ui.label(
-                                        egui::RichText::new("ferret 1.0.0")
+                                        egui::RichText::new("ferret 1.2.0")
                                             .color(fg_dim).size(10.0),
                                     );
                                     ui.label(
@@ -742,8 +772,14 @@ impl OverlayApp {
                                 LoopMode::File => " loop:file".into(),
                                 LoopMode::Playlist => " loop:list".into(),
                             };
+                            let random_mode = self.state.random_mode;
+                            let rand_str = if random_mode == RandomMode::Off {
+                                String::new()
+                            } else {
+                                format!(" {}", random_mode.short_label())
+                            };
                             ui.label(
-                                egui::RichText::new(format!("{status}{speed_str}{loop_str}"))
+                                egui::RichText::new(format!("{status}{speed_str}{loop_str}{rand_str}"))
                                     .color(fg_dim).size(10.0),
                             );
                         });
@@ -923,7 +959,7 @@ impl OverlayApp {
                                     .strong(),
                             );
                             ui.label(
-                                egui::RichText::new("1.0.0")
+                                egui::RichText::new("1.2.0")
                                     .color(fg_dim)
                                     .size(13.0),
                             );
@@ -1093,6 +1129,16 @@ impl OverlayApp {
                 if fb_resp.clicked() { self.send(Cmd::FrameBackStep); }
                 let ff_resp = self.icon_button(ui, "btn_frame_fwd", btn_size, |p, r, c| icons::frame_forward(p, r, c));
                 if ff_resp.clicked() { self.send(Cmd::FrameStep); }
+
+                ui.add_space(6.0);
+
+                // Shuffle button — cycles through random modes (Off → Folder → Tree → Step → Off).
+                let rand_active = self.state.random_mode != RandomMode::Off;
+                let rand_resp = self.icon_button_toggled(ui, "btn_random", btn_size, rand_active, |p, r, c| {
+                    icons::shuffle(p, r, c, rand_active)
+                });
+                if rand_resp.clicked() { self.send(Cmd::SetRandomMode(self.state.random_mode.cycle())); }
+                rand_resp.on_hover_text(format!("Cycle Random Mode — {}", self.state.random_mode.label()));
 
                 // Center: time display
                 ui.with_layout(Layout::centered_and_justified(egui::Direction::TopDown), |ui| {

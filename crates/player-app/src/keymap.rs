@@ -42,6 +42,8 @@ pub fn key_to_cmd(key: &Key, state: &PlaybackState) -> Option<Cmd> {
     fn is_n(k: &Key) -> bool { matches!(k, Key::Character(s) if s == "n" || s == "N") }
     fn is_p(k: &Key) -> bool { matches!(k, Key::Character(s) if s == "p" || s == "P") }
     fn is_v(k: &Key) -> bool { matches!(k, Key::Character(s) if s == "v" || s == "V") }
+    fn is_r(k: &Key) -> bool { matches!(k, Key::Character(s) if s == "r" || s == "R") }
+    fn is_s(k: &Key) -> bool { matches!(k, Key::Character(s) if s == "s" || s == "S") }
 
     // ---- Factories: produce the Cmd. State-dependent ones read `state`. ----
     fn play_pause(_: &PlaybackState) -> Cmd { Cmd::PlayPause }
@@ -71,6 +73,10 @@ pub fn key_to_cmd(key: &Key, state: &PlaybackState) -> Option<Cmd> {
     fn next_track(_: &PlaybackState) -> Cmd { Cmd::PlaylistNext }
     fn prev_track(_: &PlaybackState) -> Cmd { Cmd::PlaylistPrev }
     fn toggle_subs(_: &PlaybackState) -> Cmd { Cmd::ToggleSubVisibility }
+    fn random_next(_: &PlaybackState) -> Cmd { Cmd::RandomNext }
+    fn cycle_random(state: &PlaybackState) -> Cmd {
+        Cmd::SetRandomMode(state.random_mode.cycle())
+    }
 
     // ---- Lookup table. Order matters only for `q`/`f` which are
     //      intercepted by the caller; all other keys are mutually exclusive. ----
@@ -92,6 +98,8 @@ pub fn key_to_cmd(key: &Key, state: &PlaybackState) -> Option<Cmd> {
         (is_n,           next_track),
         (is_p,           prev_track),
         (is_v,           toggle_subs),
+        (is_r,           random_next),
+        (is_s,           cycle_random),
     ];
     TABLE
         .iter()

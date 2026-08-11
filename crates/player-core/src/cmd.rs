@@ -1,9 +1,82 @@
 //! Commands sent from the UI thread to the engine thread.
 
-use serde::{Deserialize, Serialize};
-
 use crate::error::CoreResult;
 use mpv_bindings::command::{LoadMode, SeekFlags, SeekMode};
+use serde::{Deserialize, Serialize};
+
+// ---- Random / shuffle mode ----------------------------------------------
+
+/// Describes how the random/shuffle feature selects the next file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RandomMode {
+    /// Shuffle is disabled; normal sequential playback.
+    Off,
+    /// Randomly pick from media files in the **same directory** as the
+    /// currently playing file.
+    SameFolder,
+    /// Randomly pick from media files in the **entire folder tree** rooted at
+    /// the current file's parent directory (recursive descent).
+    WholeTree,
+    /// Two-level random: first uniformly pick a subdirectory that contains
+    /// media files, then uniformly pick a file within it.  This avoids the
+    /// VLC bug where selecting a subfolder always plays the same first file.
+    StepAware,
+}
+
+impl RandomMode {
+    /// Cycle through modes: Off → SameFolder → WholeTree → StepAware → Off.
+    pub fn cycle(self) -> Self {
+        const ORDER: [RandomMode; 4] = [
+            RandomMode::Off,
+            RandomMode::SameFolder,
+            RandomMode::WholeTree,
+            RandomMode::StepAware,
+        ];
+        let idx = ORDER
+            .iter()
+            .position(|m| *m == self)
+            .expect("RandomMode is exhaustive over ORDER");
+        ORDER[(idx + 1) % ORDER.len()]
+    }
+
+    /// Human-readable label for menus.
+    pub fn label(self) -> &'static str {
+        const TABLE: [(RandomMode, &str); 4] = [
+            (RandomMode::Off,       "Random: Off"),
+            (RandomMode::SameFolder, "Random: Same Folder"),
+            (RandomMode::WholeTree,  "Random: Whole Tree"),
+            (RandomMode::StepAware, "Random: Step-Aware"),
+        ];
+        TABLE
+            .iter()
+            .copied()
+            .find(|(m, _)| *m == self)
+            .map(|(_, l)| l)
+            .expect("RandomMode is exhaustive over TABLE")
+    }
+
+    /// Short label for the status bar.
+    pub fn short_label(self) -> &'static str {
+        const TABLE: [(RandomMode, &str); 4] = [
+            (RandomMode::Off,       "rand:off"),
+            (RandomMode::SameFolder, "rand:folder"),
+            (RandomMode::WholeTree,  "rand:tree"),
+            (RandomMode::StepAware, "rand:step"),
+        ];
+        TABLE
+            .iter()
+            .copied()
+            .find(|(m, _)| *m == self)
+            .map(|(_, l)| l)
+            .expect("RandomMode is exhaustive over TABLE")
+    }
+}
+
+impl Default for RandomMode {
+    fn default() -> Self {
+        RandomMode::Off
+    }
+}
 
 // ---- Magic dialog-request strings --------------------------------------------
 //
@@ -190,6 +263,15 @@ pub enum Cmd {
     ExportABLoopVideo {
         path: String,
     },
+
+    // ---- Random / shuffle ------------------------------------------------
+
+    /// Set the random/shuffle mode. Off disables it; other modes control how
+    /// the next random file is selected (same folder, whole tree, step-aware).
+    SetRandomMode(RandomMode),
+
+    /// Pick a random file according to the current `random_mode` and load it.
+    RandomNext,
 
     // ---- Lifecycle -----------------------------------------------------
 

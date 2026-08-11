@@ -18,9 +18,11 @@
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::path::{Path, PathBuf};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
+use rand::seq::SliceRandom;
 use tracing::{debug, error, info, warn};
 
 use mpv_bindings::event::{Event as MpvEvent, EventId, LogLevel};
@@ -28,7 +30,7 @@ use mpv_bindings::handle::Builder as MpvBuilder;
 use mpv_bindings::property::{Format, Property};
 use mpv_bindings::MpvHandle;
 
-use crate::cmd::{build_loadfile, build_seek, Cmd, LoopMode, MarkerExportFormat};
+use crate::cmd::{build_loadfile, build_seek, Cmd, LoopMode, MarkerExportFormat, RandomMode};
 use crate::error::{CoreError, CoreResult};
 use crate::event::{EngineEvent, EngineEventBus, EngineEventSender, EndReason};
 use crate::options::EngineOptions;
@@ -301,6 +303,111 @@ fn engine_main(
                 thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+}
+
+// ---- Random / shuffle file-scanning helpers --------------------------------
+
+const MEDIA_EXTENSIONS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "mp3", "flac",
+    "wav", "ogg", "opus", "m4a", "aac", "wma", "m2ts", "ts", "3gp",
+    "f4v", "ogv", "weba",
+];
+
+fn is_media_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| MEDIA_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Collect media files directly in `dir` (non-recursive).
+fn collect_files_in_dir(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && is_media_file(&path) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Recursively collect media files under `dir`.
+fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && is_media_file(&path) {
+                files.push(path);
+            } else if path.is_dir() {
+                files.extend(collect_files_recursive(&path));
+            }
+        }
+    }
+    files
+}
+
+/// Step-aware collection: uniformly pick a subdirectory containing media,
+/// then return only the media files within that subdirectory.
+fn collect_files_step_aware(dir: &Path) -> Vec<PathBuf> {
+    let mut subdirs_with_media: Vec<PathBuf> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if !collect_files_in_dir(&path).is_empty() {
+                    subdirs_with_media.push(path);
+                }
+            }
+        }
+    }
+
+    // Include files directly in the root as another candidate group.
+    let root_files = collect_files_in_dir(dir);
+    if !root_files.is_empty() {
+        subdirs_with_media.push(dir.to_path_buf());
+    }
+
+    if subdirs_with_media.is_empty() {
+        return Vec::new();
+    }
+
+    let mut rng = rand::thread_rng();
+    if let Some(chosen_dir) = subdirs_with_media.choose(&mut rng) {
+        return collect_files_in_dir(chosen_dir);
+    }
+
+    Vec::new()
+}
+
+/// Unified entry point: returns the candidate list depending on mode.
+fn collect_random_candidates(current_path: &Path, mode: RandomMode) -> Vec<PathBuf> {
+    // Determine the base directory to scan:
+    //   - If current_path is a directory, scan it directly (user loaded a
+    //     folder, media files are inside it).
+    //   - If current_path is a file, scan its parent directory (user loaded
+    //     a single file, siblings are in the same folder).
+    let dir = if current_path.is_dir() {
+        current_path
+    } else {
+        // Rust doesn't count guard conditions toward exhaustiveness, so we
+        // must cover all Option variants explicitly with Some(_) | None.
+        match current_path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            Some(_) | None => return Vec::new(),
+        }
+    };
+
+    match mode {
+        RandomMode::Off => Vec::new(),
+        RandomMode::SameFolder => collect_files_in_dir(dir),
+        RandomMode::WholeTree => collect_files_recursive(dir),
+        RandomMode::StepAware => collect_files_step_aware(dir),
     }
 }
 
@@ -637,6 +744,46 @@ fn apply_cmd(mpv: &MpvHandle, bus: &EngineEventBus, cmd: &Cmd) -> CoreResult<()>
             warn!("ExportABLoopVideo reached engine — should be intercepted by main app");
             Ok(())
         }
+
+        // ---- Random / shuffle -------------------------------------------
+
+        Cmd::SetRandomMode(mode) => {
+            bus.update_state(|s| s.random_mode = *mode);
+            bus.send(EngineEvent::StateChanged);
+            info!("random mode set to {}", mode.label());
+            Ok(())
+        }
+        Cmd::RandomNext => {
+            let path_snapshot = bus.snapshot().path.clone();
+            let mode = bus.snapshot().random_mode;
+            if let Some(ref current) = path_snapshot {
+                let current_path = Path::new(current);
+                let candidates = collect_random_candidates(current_path, mode);
+                if candidates.is_empty() {
+                    let msg = format!("no media files found for random mode ({})", mode.label());
+                    warn!("{msg}");
+                    bus.send(EngineEvent::Error { message: msg });
+                    return Ok(());
+                }
+                let mut rng = rand::thread_rng();
+                let pick = candidates.choose(&mut rng).unwrap();
+                info!("random next: {}", pick.display());
+                let path_str = pick.to_string_lossy().into_owned();
+                let mpv_cmd = mpv_bindings::command::Command::loadfile(
+                    &path_str,
+                    mpv_bindings::command::LoadMode::Replace,
+                )?;
+                mpv.command(&mpv_cmd)?;
+                // Unpause so the new file starts playing.
+                mpv.set_property(&Property::flag("pause", false))?;
+            } else {
+                bus.send(EngineEvent::Error {
+                    message: "Random Next: no file currently loaded".into(),
+                });
+            }
+            Ok(())
+        }
+
         Cmd::Shutdown => unreachable!("handled by caller"),
     }
 }

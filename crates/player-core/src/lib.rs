@@ -32,7 +32,7 @@ pub mod error;
 pub mod options;
 
 pub use cmd::{
-    Cmd, LoadOptions, LoopMode, MarkerExportFormat,
+    Cmd, LoadOptions, LoopMode, MarkerExportFormat, RandomMode,
     MAGIC_FILE_DIALOG, MAGIC_FOLDER_DIALOG, MAGIC_PLAYLIST_DIALOG,
     MAGIC_SAVE_DIALOG_TXT, MAGIC_SAVE_DIALOG_JSON,
     MAGIC_SUBTITLE_DIALOG, MAGIC_IMPORT_MARKERS_DIALOG,

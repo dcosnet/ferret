@@ -114,6 +114,10 @@ struct FerretApp {
     /// know what Cmd to emit once we have the path.
     dialog_result_rx: crossbeam_channel::Receiver<(DialogKind, DialogResult)>,
     dialog_result_tx: crossbeam_channel::Sender<(DialogKind, DialogResult)>,
+    /// Whether either of our windows currently has keyboard focus.
+    /// When false, the overlay drops from AlwaysOnTop so it doesn't block
+    /// other applications.
+    has_focus: bool,
 }
 
 impl FerretApp {
@@ -133,6 +137,7 @@ impl FerretApp {
             cmd_rx,
             dialog_result_rx,
             dialog_result_tx,
+            has_focus: true,
         }
     }
 
@@ -196,6 +201,16 @@ impl FerretApp {
         self.overlay = Some(overlay_renderer);
         self.windows.video = Some(video_window_arc);
         self.windows.overlay = Some(overlay_window_arc);
+
+        // 8. Tell X11 the overlay is a helper window for the video window.
+        //    This makes the WM:
+        //    - Skip the overlay in the taskbar / alt-tab list
+        //    - Keep the overlay visually grouped with the video window
+        //    - Un-fullscreen both when focus leaves
+        set_x11_overlay_hints(
+            self.windows.video.as_ref().unwrap(),
+            self.windows.overlay.as_ref().unwrap(),
+        );
 
         self.request_redraw_both();
         Ok(())
@@ -339,12 +354,33 @@ impl FerretApp {
         self.fullscreen = !self.fullscreen;
         if self.fullscreen {
             video.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            // Also fullscreen the overlay so it covers the entire screen.
+            // Without this, the overlay stays at the old windowed size while
+            // the video fills the screen — controls would be cut off.
+            if let Some(overlay_win) = self.windows.overlay.as_ref() {
+                overlay_win.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
         } else {
             video.set_fullscreen(None);
+            if let Some(overlay_win) = self.windows.overlay.as_ref() {
+                overlay_win.set_fullscreen(None);
+            }
         }
         // Sync state to overlay so the fullscreen button reflects it.
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.app.set_fullscreen(self.fullscreen);
+        }
+    }
+
+    /// Update the overlay window level based on focus state.
+    /// When we have focus: overlay is AlwaysOnTop (controls visible above video).
+    /// When we lose focus: overlay drops to Normal so it doesn't block other apps.
+    fn update_overlay_focus(&mut self) {
+        let Some(overlay_win) = self.windows.overlay.as_ref() else { return; };
+        if self.has_focus {
+            overlay_win.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
+        } else {
+            overlay_win.set_window_level(winit::window::WindowLevel::Normal);
         }
     }
 }
@@ -369,6 +405,10 @@ impl ApplicationHandler for FerretApp {
 
         match kind {
             WindowKind::Video => match event {
+                WindowEvent::Focused(gained) => {
+                    self.has_focus = gained;
+                    self.update_overlay_focus();
+                }
                 WindowEvent::KeyboardInput {
                     event:
                         KeyEvent {
@@ -419,6 +459,10 @@ impl ApplicationHandler for FerretApp {
                 _ => {}
             },
             WindowKind::Overlay => match event {
+                WindowEvent::Focused(gained) => {
+                    self.has_focus = gained;
+                    self.update_overlay_focus();
+                }
                 WindowEvent::CursorMoved { position, .. } => {
                     // The renderer sets pixels_per_point=1.0, so egui's
                     // coordinate system matches physical pixels directly.
@@ -615,6 +659,146 @@ fn set_x11_window_background(window: &Arc<winit::window::Window>, pixel: u64) {
         _ => {
             // Not X11 — Wayland, macOS, Windows, etc. No background pixel
             // concept; the compositing model handles this differently.
+        }
+    }
+}
+
+/// Set X11 hints on the overlay window so the window manager treats it as a
+/// helper/child of the video window rather than a standalone top-level window.
+///
+/// Three hints are set:
+///
+/// 1. **`_NET_WM_WINDOW_TYPE = DIALOG`** — tells EWMH-compliant WMs that the
+///    overlay is a dialog/helper window, not a normal application window. Most
+///    WMs respond by:
+///    - Skipping it in the taskbar and alt-tab list
+///    - Grouping it with its parent window
+///    - Not giving it its own virtual desktop entry
+///
+/// 2. **`XSetTransientForHint`** — X11 ICCCM hint that marks the overlay as a
+///    "transient" (short-lived) window belonging to the video window. WMs use
+///    this to:
+///    - Center the dialog over its parent
+///    - Keep it on the same screen/monitor
+///    - Un-map it when the parent is withdrawn or iconified
+///
+/// 3. **`_NET_WM_STATE: _NET_WM_STATE_SKIP_TASKBAR`** — explicit hint for WMs
+///    that don't respect _NET_WM_WINDOW_TYPE=DIALOG for taskbar suppression.
+///
+/// Together, these hints ensure the overlay appears as a single integrated UI
+/// with the video window, not as a separate top-level window that clutters
+/// the taskbar and blocks other apps when fullscreen.
+fn set_x11_overlay_hints(
+    video: &Arc<winit::window::Window>,
+    overlay: &Arc<winit::window::Window>,
+) {
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+    let Ok(video_handle) = video.window_handle() else { return; };
+    let Ok(overlay_handle) = overlay.window_handle() else { return; };
+    let Ok(disp_handle) = overlay.display_handle() else { return; };
+
+    let video_raw = video_handle.as_raw();
+    let overlay_raw = overlay_handle.as_raw();
+    let disp_raw = disp_handle.as_raw();
+
+    match (
+        video_raw,
+        overlay_raw,
+        disp_raw,
+    ) {
+        (
+            raw_window_handle::RawWindowHandle::Xlib(video_x),
+            raw_window_handle::RawWindowHandle::Xlib(overlay_x),
+            raw_window_handle::RawDisplayHandle::Xlib(d),
+        ) => {
+            #[link(name = "X11")]
+            extern "C" {
+                fn XInternAtom(
+                    display: *mut std::os::raw::c_void,
+                    name: *const std::os::raw::c_char,
+                    only_if_exists: std::os::raw::c_int,
+                ) -> std::os::raw::c_ulong;
+                fn XSetTransientForHint(
+                    display: *mut std::os::raw::c_void,
+                    w: std::os::raw::c_ulong,
+                    prop_window: std::os::raw::c_ulong,
+                ) -> std::os::raw::c_int;
+                fn XChangeProperty(
+                    display: *mut std::os::raw::c_void,
+                    w: std::os::raw::c_ulong,
+                    property: std::os::raw::c_ulong,
+                    atype: std::os::raw::c_ulong,
+                    format: std::os::raw::c_int,
+                    mode: std::os::raw::c_int,
+                    data: *const std::os::raw::c_uchar,
+                    nelements: std::os::raw::c_int,
+                ) -> std::os::raw::c_int;
+                fn XFlush(display: *mut std::os::raw::c_void) -> std::os::raw::c_int;
+            }
+
+            let Some(display_ptr) = d.display else {
+                warn!("XlibDisplayHandle.display is None; cannot set overlay hints");
+                return;
+            };
+            let display = display_ptr.as_ptr();
+            unsafe {
+                let video_xid = video_x.window as std::os::raw::c_ulong;
+                let overlay_xid = overlay_x.window as std::os::raw::c_ulong;
+
+                // 1. Set _NET_WM_WINDOW_TYPE = DIALOG on the overlay.
+                let atom_window_type =
+                    XInternAtom(display, b"_NET_WM_WINDOW_TYPE\0".as_ptr() as *const _, 0);
+                let atom_dialog =
+                    XInternAtom(display, b"_NET_WM_WINDOW_TYPE_DIALOG\0".as_ptr() as *const _, 0);
+                let xa_atom = XInternAtom(display, b"ATOM\0".as_ptr() as *const _, 0);
+
+                XChangeProperty(
+                    display,
+                    overlay_xid,
+                    atom_window_type,
+                    xa_atom,
+                    32,
+                    0, // PropModeReplace
+                    &atom_dialog as *const _ as *const std::os::raw::c_uchar,
+                    1,
+                );
+
+                // 2. Set _NET_WM_STATE = _NET_WM_STATE_SKIP_TASKBAR.
+                let atom_wm_state =
+                    XInternAtom(display, b"_NET_WM_STATE\0".as_ptr() as *const _, 0);
+                let atom_skip_taskbar =
+                    XInternAtom(display, b"_NET_WM_STATE_SKIP_TASKBAR\0".as_ptr() as *const _, 0);
+                XChangeProperty(
+                    display,
+                    overlay_xid,
+                    atom_wm_state,
+                    xa_atom,
+                    32,
+                    0,
+                    &atom_skip_taskbar as *const _ as *const std::os::raw::c_uchar,
+                    1,
+                );
+
+                // 3. Set transient-for hint: overlay belongs to video window.
+                XSetTransientForHint(display, overlay_xid, video_xid);
+
+                XFlush(display);
+            }
+            info!(
+                "set overlay X11 hints: DIALOG type + SKIP_TASKBAR + transient-for video window"
+            );
+        }
+        (
+            raw_window_handle::RawWindowHandle::Xcb(_),
+            raw_window_handle::RawWindowHandle::Xcb(_),
+            raw_window_handle::RawDisplayHandle::Xcb(_),
+        ) => {
+            warn!("XCB backend detected; overlay WM hints not set (Xlib path only)");
+        }
+        _ => {
+            // Not X11 — no WM hints needed (Wayland compositors handle this
+            // via their own protocol; macOS/iOS use NSPanel/etc.).
         }
     }
 }

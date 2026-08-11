@@ -405,3 +405,72 @@ pub fn speed_gauge(painter: &Painter, rect: Rect, color: Color32, speed: f32) {
         Stroke::new(thick * 1.2, Color32::from_rgb(255, 168, 40)),
     );
 }
+
+/// Shuffle icon — two crossed arrows with arrowheads. When `active` is true
+/// the icon is rendered at full opacity; when false it is drawn dimmed to
+/// indicate the feature is disengaged.
+pub fn shuffle(painter: &Painter, rect: Rect, color: Color32, active: bool) {
+    let size = rect.height().min(rect.width()) * 0.55;
+    let cx = rect.center().x;
+    let cy = rect.center().y;
+    let thick = size * 0.10;
+    let alpha = if active { 1.0 } else { 0.3 };
+    let col = Color32::from_rgba_unmultiplied(
+        (color.r() as f32 * alpha) as u8,
+        (color.g() as f32 * alpha) as u8,
+        (color.b() as f32 * alpha) as u8,
+        (color.a() as f32 * alpha) as u8,
+    );
+
+    // Two lines crossing in an X pattern.
+    let half_w = size * 0.45;
+    let half_h = size * 0.28;
+
+    // Top-left → bottom-right arrow.
+    let tl = Pos2::new(cx - half_w, cy - half_h);
+    let br = Pos2::new(cx + half_w, cy + half_h);
+    painter.line_segment([tl, br], Stroke::new(thick, col));
+
+    // Bottom-left → top-right arrow.
+    let bl = Pos2::new(cx - half_w, cy + half_h);
+    let tr = Pos2::new(cx + half_w, cy - half_h);
+    painter.line_segment([bl, tr], Stroke::new(thick, col));
+
+    // Arrowheads.
+    let arrow = size * 0.16;
+    let angle = 0.4;
+
+    // Arrowhead at top-right (on bl→tr).
+    let dir_x = -(tr.x - bl.x);
+    let dir_y = -(tr.y - bl.y);
+    let len = (dir_x * dir_x + dir_y * dir_y).sqrt();
+    let dx = dir_x / len;
+    let dy = dir_y / len;
+    let px = -dy;
+    let py = dx;
+    painter.line_segment(
+        [tr, Pos2::new(tr.x + (dx + px) * arrow * angle, tr.y + (dy + py) * arrow * angle)],
+        Stroke::new(thick, col),
+    );
+    painter.line_segment(
+        [tr, Pos2::new(tr.x + (dx - px) * arrow * angle, tr.y + (dy - py) * arrow * angle)],
+        Stroke::new(thick, col),
+    );
+
+    // Arrowhead at bottom-right (on tl→br).
+    let dir_x2 = -(br.x - tl.x);
+    let dir_y2 = -(br.y - tl.y);
+    let len2 = (dir_x2 * dir_x2 + dir_y2 * dir_y2).sqrt();
+    let dx2 = dir_x2 / len2;
+    let dy2 = dir_y2 / len2;
+    let px2 = -dy2;
+    let py2 = dx2;
+    painter.line_segment(
+        [br, Pos2::new(br.x + (dx2 + px2) * arrow * angle, br.y + (dy2 + py2) * arrow * angle)],
+        Stroke::new(thick, col),
+    );
+    painter.line_segment(
+        [br, Pos2::new(br.x + (dx2 - px2) * arrow * angle, br.y + (dy2 - py2) * arrow * angle)],
+        Stroke::new(thick, col),
+    );
+}

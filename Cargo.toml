@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.2.3"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-or-later"
@@ -50,6 +50,9 @@ pollster   = "0.4"      # lightweight blocking executor for wgpu init
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc       = "0.2"
+
+# Random / shuffle
+rand = "0.8"
 
 [profile.release]
 opt-level = 3
