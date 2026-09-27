@@ -180,6 +180,26 @@ pub enum Cmd {
     /// Skip to the previous playlist entry. (mpv `playlist-prev`.)
     PlaylistPrev,
 
+    /// Move the queue entry at index `from` so that it takes the place of the
+    /// entry currently at index `to` (mpv `playlist-move` semantics: the moved
+    /// entry is inserted *before* the entry at `to`; `to == playlist.len()`
+    /// appends to the end; after `playlist-move i j` with `i < j` the entry
+    /// lands at `j - 1`). Indices are 0-based.
+    PlaylistMove {
+        from: usize,
+        to: usize,
+    },
+
+    /// Remove the queue entry at `index`. (mpv `playlist-remove`.)
+    PlaylistRemove {
+        index: usize,
+    },
+
+    /// Jump to playing the queue entry at `index`. (mpv `playlist-play-index`.)
+    PlaylistPlayIndex {
+        index: usize,
+    },
+
     // ---- Speed ---------------------------------------------------------
 
     /// Set playback speed. mpv range is 0.01..=100.0; we expose 0.25..=4.0
@@ -221,6 +241,35 @@ pub enum Cmd {
     /// Flip the video vertically (upside-down). Toggles mpv's `vf` filter
     /// `vflip`. Pass `true` to enable, `false` to disable.
     SetVideoFlipV(bool),
+
+    // ---- Video zoom / pan ----------------------------------------------
+
+    /// Set the video zoom directly, in log2 units (mpv `video-zoom`):
+    /// 0 = fit-to-window, 1.0 = 2×, -1.0 = ½×. Clamped to
+    /// [`VIDEO_ZOOM_RANGE`].
+    SetVideoZoom(f32),
+
+    /// Adjust zoom by a delta in log2 units (menu steps, Ctrl+wheel).
+    /// Clamped to [`VIDEO_ZOOM_RANGE`].
+    AdjustVideoZoom(f32),
+
+    /// Set the video pan directly, in screen-fraction units (mpv
+    /// `video-pan-x` / `video-pan-y`). Positive x = right, positive
+    /// y = down. Each axis is clamped to ±[`VIDEO_PAN_LIMIT`].
+    SetVideoPan {
+        x: f32,
+        y: f32,
+    },
+
+    /// Pan by deltas in screen-fraction units — the drag-the-video
+    /// gesture. Positive dx = right, positive dy = down (window coords).
+    AdjustVideoPan {
+        dx: f32,
+        dy: f32,
+    },
+
+    /// Reset zoom and pan to neutral (zoom 0, pan 0,0).
+    ResetVideoPanZoom,
 
     // ---- A/B markers ---------------------------------------------------
 
@@ -393,4 +442,92 @@ pub(crate) fn build_loadfile(path: &str, opts: &LoadOptions) -> CoreResult<mpv_b
 /// Convenience: build the mpv `seek` Command.
 pub(crate) fn build_seek(target: f64, mode: SeekMode, flags: SeekFlags) -> CoreResult<mpv_bindings::command::Command> {
     Ok(mpv_bindings::command::Command::seek(target, mode, flags)?)
+}
+
+/// Translate "move the entry at `from` so its **final** index is `final_pos`"
+/// into the `(from, to)` pair used by `Cmd::PlaylistMove` (mpv's
+/// insert-before semantics). `len` is the current queue length; `to` may come
+/// out as `len`, which mpv interprets as "append at the end".
+///
+/// Used by the queue sidebar's type-a-number reordering.
+pub fn playlist_move_args_for_final(from: usize, final_pos: usize, len: usize) -> (usize, usize) {
+    if final_pos <= from {
+        (from, final_pos)
+    } else {
+        (from, (final_pos + 1).min(len))
+    }
+}
+
+// ---- Video zoom / pan limits -------------------------------------------
+
+/// Allowed zoom range in log2 units: -1.0 = half size, 2.0 = 4×.
+/// mpv itself accepts (much) wider values; this keeps the UI from losing
+/// the video off-canvas.
+pub const VIDEO_ZOOM_RANGE: (f32, f32) = (-1.0, 2.0);
+
+/// Allowed per-axis pan range, in screen fractions. ±1.0 already moves the
+/// video a full window across — beyond that there is nothing to look at.
+pub const VIDEO_PAN_LIMIT: f32 = 1.0;
+
+/// Clamp a zoom value (log2 units) into [`VIDEO_ZOOM_RANGE`].
+pub fn clamp_video_zoom(v: f32) -> f32 {
+    v.clamp(VIDEO_ZOOM_RANGE.0, VIDEO_ZOOM_RANGE.1)
+}
+
+/// Clamp a pan axis value into ±[`VIDEO_PAN_LIMIT`].
+pub fn clamp_video_pan(v: f32) -> f32 {
+    v.clamp(-VIDEO_PAN_LIMIT, VIDEO_PAN_LIMIT)
+}
+
+#[cfg(test)]
+mod playlist_move_tests {
+    use super::playlist_move_args_for_final as args;
+
+    #[test]
+    fn moving_up_inserts_before_target() {
+        // Entry 4 → final index 1: takes the place of the entry at 1.
+        assert_eq!(args(4, 1, 6), (4, 1));
+    }
+
+    #[test]
+    fn moving_down_lands_after_target() {
+        // Entry 1 → final index 3 must insert before the entry currently at 4.
+        assert_eq!(args(1, 3, 6), (1, 4));
+    }
+
+    #[test]
+    fn move_to_end_clamps_to_len() {
+        // Entry 0 → final index 5 of 6 = last slot; insert-before 6 == append.
+        assert_eq!(args(0, 5, 6), (0, 6));
+        // Even an out-of-range request clamps instead of overflowing.
+        assert_eq!(args(0, 99, 6), (0, 6));
+    }
+
+    #[test]
+    fn same_position_is_noop() {
+        assert_eq!(args(2, 2, 6), (2, 2));
+    }
+}
+
+#[cfg(test)]
+mod zoom_pan_tests {
+    use super::{clamp_video_pan, clamp_video_zoom, VIDEO_PAN_LIMIT, VIDEO_ZOOM_RANGE};
+
+    #[test]
+    fn zoom_clamps_to_range() {
+        assert_eq!(clamp_video_zoom(5.0), VIDEO_ZOOM_RANGE.1);
+        assert_eq!(clamp_video_zoom(-9.0), VIDEO_ZOOM_RANGE.0);
+        assert_eq!(clamp_video_zoom(0.5), 0.5);
+        // -1.0 log2 = half size, 2.0 log2 = 4x — both reachable exactly.
+        assert_eq!(clamp_video_zoom(-1.0), -1.0);
+        assert_eq!(clamp_video_zoom(2.0), 2.0);
+    }
+
+    #[test]
+    fn pan_clamps_symmetric() {
+        assert_eq!(clamp_video_pan(3.0), VIDEO_PAN_LIMIT);
+        assert_eq!(clamp_video_pan(-3.0), -VIDEO_PAN_LIMIT);
+        assert_eq!(clamp_video_pan(0.25), 0.25);
+        assert_eq!(clamp_video_pan(0.0), 0.0);
+    }
 }

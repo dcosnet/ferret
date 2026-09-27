@@ -6,10 +6,11 @@
 # memory bloat in hot-path enums like Cmd and EngineEvent.
 enum-variant-size-threshold = 256
 
-# Flag types with too many fields — a code smell for "split this struct".
-# PlaybackState has many fields by design (it's a snapshot), so it carries
-# an explicit #[allow] where needed.
-struct-field-size-threshold = 64
+# NOTE: `struct-field-size-threshold` was never a recognized clippy.toml
+# key on current toolchains and hard-fails config parsing (the related
+# struct-bloat lints are field-count based, not size based). Removed so
+# `cargo clippy` runs at all; see PlaybackState's #[allow]s for the
+# "too many fields" side of the original intent.
 
 # Single-use bindings are often a sign of "extract this to a named variable
 # for clarity" — but sometimes they're just noise. Keep the lint at warn

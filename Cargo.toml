@@ -42,6 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 winit      = { version = "0.30", features = ["x11", "wayland", "rwh_06"] }
 raw-window-handle = "0.6"
 egui       = "0.29"
+x11rb      = "0.13"   # X11 SHAPE extension (bounding shape), same version winit locks
 egui-wgpu  = "0.29"
 wgpu       = "22"      # pinned to match egui-wgpu 0.29
 pollster   = "0.4"      # lightweight blocking executor for wgpu init

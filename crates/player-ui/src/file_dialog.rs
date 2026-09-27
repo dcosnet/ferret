@@ -49,6 +49,8 @@ pub enum FileDialogKind {
     LoadFile,
     LoadFolder,
     LoadPlaylist,
+    /// Save the current queue (in the user-organized order) as an .m3u file.
+    SavePlaylist,
     SaveMarkers(MarkerExportFormat),
     LoadSubtitle,
     ImportMarkers,
@@ -61,6 +63,7 @@ impl FileDialogKind {
             FileDialogKind::LoadFile => "Open File",
             FileDialogKind::LoadFolder => "Open Folder",
             FileDialogKind::LoadPlaylist => "Open Playlist (select multiple files)",
+            FileDialogKind::SavePlaylist => "Save Playlist As",
             FileDialogKind::SaveMarkers(_) => "Export Markers",
             FileDialogKind::LoadSubtitle => "Open Subtitle File",
             FileDialogKind::ImportMarkers => "Import Markers",
@@ -69,7 +72,10 @@ impl FileDialogKind {
     }
 
     fn is_save(&self) -> bool {
-        matches!(self, FileDialogKind::SaveMarkers(_) | FileDialogKind::ExportVideo)
+        matches!(
+            self,
+            FileDialogKind::SaveMarkers(_) | FileDialogKind::ExportVideo | FileDialogKind::SavePlaylist
+        )
     }
 
     fn is_multi(&self) -> bool {
@@ -85,6 +91,7 @@ impl FileDialogKind {
             FileDialogKind::LoadFile => MEDIA_EXTENSIONS,
             FileDialogKind::LoadFolder => &[],
             FileDialogKind::LoadPlaylist => &[], // we filter in-code (media OR playlist)
+            FileDialogKind::SavePlaylist => &["m3u", "m3u8"],
             FileDialogKind::SaveMarkers(fmt) => match fmt {
                 MarkerExportFormat::Text => &["txt"],
                 MarkerExportFormat::Json => &["json"],
@@ -104,6 +111,7 @@ impl FileDialogKind {
                 MEDIA_EXTENSIONS.contains(&ext) || PLAYLIST_EXTENSIONS.contains(&ext)
             }
             FileDialogKind::SaveMarkers(_) => true, // save accepts any extension
+            FileDialogKind::SavePlaylist => true,   // save accepts any extension
             FileDialogKind::LoadSubtitle => SUBTITLE_EXTENSIONS.contains(&ext),
             FileDialogKind::ImportMarkers => MARKER_EXTENSIONS.contains(&ext),
             FileDialogKind::ExportVideo => true, // save accepts any extension
@@ -147,6 +155,13 @@ pub struct FileDialog {
 
 impl FileDialog {
     pub fn open(kind: FileDialogKind) -> Self {
+        Self::open_with_filename(kind, None)
+    }
+
+    /// Open a dialog, optionally pre-filling the filename field (save
+    /// dialogs). `suggested` gives the user a one-click default instead of
+    /// forcing them to either type blind or click an existing file.
+    pub fn open_with_filename(kind: FileDialogKind, suggested: Option<String>) -> Self {
         let start_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let mut dlg = Self {
             kind,
@@ -154,7 +169,7 @@ impl FileDialog {
             entries: Vec::new(),
             selected: None,
             selected_multi: Vec::new(),
-            filename: String::new(),
+            filename: suggested.unwrap_or_default(),
             error: None,
             opened_at: Instant::now(),
         };

@@ -16,6 +16,17 @@ use crate::app::OverlayApp;
 
 static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
 
+/// Padding (pixels) added around every painted rect before it becomes part
+/// of the overlay's X11 bounding shape. Covers glyph antialiasing bleed and
+/// sub-pixel rounding so no painted pixel falls outside the shape.
+pub const SHAPE_PAD_PX: f32 = 2.0;
+
+/// Upper bound on the number of rects sent to XShapeCombineRectangles per
+/// frame. Above it we degrade to a single coarse union rect — the X server
+/// unions the list anyway, so the only cost of coarseness is a slightly
+/// larger see-through-blocking region for one frame.
+const MAX_SHAPE_RECTS: usize = 64;
+
 /// Owns the wgpu surface + egui_wgpu renderer for ONE overlay window.
 pub struct OverlayRenderer {
     pub device: Arc<wgpu::Device>,
@@ -26,6 +37,16 @@ pub struct OverlayRenderer {
     pub egui_ctx: egui::Context,
     pub app: OverlayApp,
     pub viewport_size: [u32; 2],
+    /// Pixel-space rects egui actually painted last frame (window-local).
+    /// The main app mirrors these onto the overlay window as an X11
+    /// *bounding shape* (XShape), so the overlay is visually present ONLY
+    /// where UI chrome exists. The rest of the window is a literal hole in
+    /// the X window — the video window underneath shows through with NO
+    /// dependence on compositors, EGL/Vulkan alpha modes, or window
+    /// visuals. This is what makes "no video output" structurally
+    /// impossible: the overlay can no longer blanket the video with a
+    /// possibly-opaque surface.
+    pub painted_rects: Vec<egui::Rect>,
     /// Timestamp until which the overlay must clear opaque (dark grey)
     /// instead of transparent. Set by `resize()`, `suppress_transparency()`,
     /// and the surface-error recovery paths. Keeps the desktop from showing
@@ -82,9 +103,6 @@ impl OverlayRenderer {
 
         let caps = surface.get_capabilities(&adapter);
         // Prefer non-sRGB formats — egui warns about sRGB framebuffers
-        // ("Detected a linear (sRGBA aware) framebuffer Bgra8UnormSrgb.
-        // egui prefers Rgba8Unorm or Bgra8Unorm"). Non-sRGB avoids color
-        // management issues during window operations.
         let format = caps
             .formats
             .iter()
@@ -99,10 +117,31 @@ impl OverlayRenderer {
         // broken presentation during window moves/resizes. Fifo is the
         // most compatible mode and is required by the WebGPU spec.
         let present_mode = wgpu::PresentMode::Fifo;
-        // Use Auto alpha mode — let the surface pick the best-supported
-        // compositing mode. PreMultiplied can cause artifacts on compositors
-        // that don't fully support it (common on Xfwm4).
-        let alpha_mode = wgpu::CompositeAlphaMode::Auto;
+        // Explicit alpha-mode selection. `CompositeAlphaMode::Auto` in wgpu
+        // can only ever resolve to Opaque or Inherit (see wgpu-core
+        // `device/global.rs`, the `Auto` fallback list) — it will NEVER pick
+        // PreMultiplied/PostMultiplied, so on a Vulkan-backed surface (any
+        // real GPU) an `Auto` overlay presents OPAQUE black over the video:
+        // the recurring "app has no video output" bug. Prefer an actually
+        // transparent composite mode when the surface reports one; fall
+        // back to Opaque (harmless — the X11 bounding shape is what
+        // guarantees the video is visible, and the bars look fine opaque).
+        let alpha_mode = caps
+            .alpha_modes
+            .iter()
+            .copied()
+            .find(|m| {
+                matches!(
+                    m,
+                    wgpu::CompositeAlphaMode::PreMultiplied
+                        | wgpu::CompositeAlphaMode::PostMultiplied
+                )
+            })
+            .unwrap_or(wgpu::CompositeAlphaMode::Opaque);
+        info!(
+            "overlay alpha modes: supported={:?} chosen={:?}",
+            caps.alpha_modes, alpha_mode
+        );
 
         let size = window.inner_size();
         let surface_config = wgpu::SurfaceConfiguration {
@@ -143,6 +182,7 @@ impl OverlayRenderer {
             egui_ctx,
             app,
             viewport_size: [size.width.max(1), size.height.max(1)],
+            painted_rects: Vec::new(),
             force_opaque_until: None,
         })
     }
@@ -150,6 +190,7 @@ impl OverlayRenderer {
     /// Render one frame.
     pub fn render(&mut self, state: PlaybackState, mouse_pos: Option<egui::Pos2>) -> Result<()> {
         self.app.update_state(state);
+        self.app.pointer_pos = mouse_pos;
         self.app.set_mouse_inside(mouse_pos.is_some());
         self.app.compute_visibility();
         self.app.poll_events();
@@ -175,6 +216,18 @@ impl OverlayRenderer {
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             self.app.draw(ctx);
         });
+
+        // Remember whether egui now has a focused text field (e.g. the
+        // save-dialog filename input). The main app consults this flag on
+        // the next physical keypress to decide whether the keystroke goes
+        // to the text field (translated to egui events) or to the global
+        // hotkey map.
+        self.app.ui_wants_keyboard = self.egui_ctx.wants_keyboard_input();
+
+        // Record what was actually painted, in window-local pixel coords.
+        // The main app applies this as the overlay's X11 bounding shape
+        // (see `painted_pixel_rects`).
+        self.painted_rects = painted_pixel_rects(&full_output.shapes, SHAPE_PAD_PX);
 
         // Sync textures (new/updated).
         for (id, image_delta) in &full_output.textures_delta.set {
@@ -331,5 +384,174 @@ impl OverlayRenderer {
     /// any lag in libmpv's repainting of the video window underneath.
     pub fn suppress_transparency(&mut self, duration: Duration) {
         self.force_opaque_until = Some(Instant::now() + duration);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Painted-rect extraction (feeds the X11 bounding shape)
+// ---------------------------------------------------------------------------
+
+/// Compute the window-local pixel rects egui actually painted this frame.
+///
+/// For every clipped shape we take the shape's visual bounding box, clip it
+/// to the shape's clip rect, pad it by `pad`, and then coalesce the list
+/// into a small set of disjoint rects. Empty input (nothing painted —
+/// controls auto-hidden, no dialogs) yields an empty Vec, which the caller
+/// turns into an empty bounding region: the overlay becomes fully
+/// see-through AND click-through, and the video window beneath receives
+/// the input events.
+pub fn painted_pixel_rects(shapes: &[egui::epaint::ClippedShape], pad: f32) -> Vec<egui::Rect> {
+    let pad_v = egui::vec2(pad, pad);
+    let mut rects: Vec<egui::Rect> = shapes
+        .iter()
+        .filter_map(|cs| {
+            let bounds = cs.shape.visual_bounding_rect();
+            // Rect::NOTHING (and any non-finite garbage) means "paints
+            // nothing visible".
+            if bounds.is_negative() || !bounds.min.is_finite() || !bounds.max.is_finite() {
+                return None;
+            }
+            let clipped = bounds.intersect(cs.clip_rect);
+            if clipped.is_negative() || clipped.width() <= 0.0 || clipped.height() <= 0.0 {
+                return None;
+            }
+            Some(egui::Rect::from_min_max(
+                clipped.min - pad_v,
+                clipped.max + pad_v,
+            ))
+        })
+        .collect();
+
+    coalesce_rects(&mut rects, 4);
+
+    if rects.len() > MAX_SHAPE_RECTS {
+        // Too fragmented — collapse to the overall union. The X server
+        // unions the rect list anyway, so this is purely a protocol-cost
+        // guard.
+        let mut iter = rects.into_iter();
+        let Some(first) = iter.next() else {
+            return Vec::new();
+        };
+        let union = iter.fold(first, |acc, r| acc.union(r));
+        return vec![union];
+    }
+    rects
+}
+
+/// Merge overlapping rects until stable (bounded passes). Adjacent glyph
+/// runs and widget clusters collapse into a handful of rects this way, so
+/// the X11 shape request stays tiny.
+fn coalesce_rects(rects: &mut Vec<egui::Rect>, max_passes: usize) {
+    for _ in 0..max_passes {
+        let mut out: Vec<egui::Rect> = Vec::with_capacity(rects.len());
+        let mut merged_any = false;
+        for r in rects.iter().copied() {
+            match out.iter_mut().find(|o| o.intersects(r)) {
+                Some(o) => {
+                    *o = o.union(r);
+                    merged_any = true;
+                }
+                None => out.push(r),
+            }
+        }
+        *rects = out;
+        if !merged_any {
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use egui::{Color32, Pos2, Rect, Shape, Vec2};
+
+    fn clipped(clip: Rect, shape: Shape) -> egui::epaint::ClippedShape {
+        egui::epaint::ClippedShape { clip_rect: clip, shape }
+    }
+
+    fn full_screen() -> Rect {
+        Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0))
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h))
+    }
+
+    #[test]
+    fn nothing_painted_yields_empty() {
+        // No shapes at all -> no rects.
+        assert!(painted_pixel_rects(&[], 2.0).is_empty());
+        // A Noop shape paints nothing.
+        let shapes = vec![clipped(full_screen(), Shape::Noop)];
+        assert!(painted_pixel_rects(&shapes, 2.0).is_empty());
+    }
+
+    #[test]
+    fn single_painted_rect_is_padded() {
+        let shapes = vec![clipped(
+            full_screen(),
+            Shape::rect_filled(rect(100.0, 200.0, 50.0, 20.0), 0.0, Color32::GRAY),
+        )];
+        let out = painted_pixel_rects(&shapes, 2.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], rect(98.0, 198.0, 54.0, 24.0));
+    }
+
+    #[test]
+    fn overlapping_rects_coalesce() {
+        let shapes = vec![
+            clipped(full_screen(), Shape::rect_filled(rect(0.0, 0.0, 100.0, 30.0), 0.0, Color32::GRAY)),
+            clipped(full_screen(), Shape::rect_filled(rect(50.0, 10.0, 100.0, 30.0), 0.0, Color32::GRAY)),
+        ];
+        let out = painted_pixel_rects(&shapes, 0.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], rect(0.0, 0.0, 150.0, 40.0));
+    }
+
+    #[test]
+    fn disjoint_rects_stay_disjoint() {
+        // Top menu strip and bottom control bar must not merge into a
+        // full-window rect — that would re-create the "overlay covers the
+        // video" bug the shape exists to prevent.
+        let shapes = vec![
+            clipped(full_screen(), Shape::rect_filled(rect(0.0, 0.0, 1280.0, 32.0), 0.0, Color32::GRAY)),
+            clipped(full_screen(), Shape::rect_filled(rect(0.0, 602.0, 1280.0, 118.0), 0.0, Color32::GRAY)),
+        ];
+        let out = painted_pixel_rects(&shapes, 2.0);
+        assert_eq!(out.len(), 2);
+        assert!((out[0].center().y - 16.0).abs() < 0.5);
+        assert!((out[1].center().y - 661.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn clip_rect_trims_shape_bounds() {
+        // A shape whose bounds exceed its clip rect must be trimmed, so the
+        // shape region never claims area egui was not allowed to paint.
+        let shapes = vec![clipped(
+            rect(0.0, 0.0, 100.0, 100.0),
+            Shape::rect_filled(rect(0.0, 0.0, 1280.0, 720.0), 0.0, Color32::GRAY),
+        )];
+        let out = painted_pixel_rects(&shapes, 0.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], rect(0.0, 0.0, 100.0, 100.0));
+    }
+
+    #[test]
+    fn rect_cap_collapses_to_union() {
+        // >MAX_SHAPE_RECTS disjoint rects (all within the clip window!) ->
+        // one coarse union rect.
+        let mut shapes = Vec::new();
+        for i in 0..(MAX_SHAPE_RECTS + 10) {
+            let x = (i as f32) * 3.0;
+            shapes.push(clipped(
+                full_screen(),
+                Shape::rect_filled(rect(x, 0.0, 1.0, 10.0), 0.0, Color32::GRAY),
+            ));
+        }
+        let out = painted_pixel_rects(&shapes, 0.0);
+        assert_eq!(out.len(), 1);
+        // 74 rects (MAX + 10) at 3px pitch: last spans 219..220px.
+        assert!((out[0].width() - 220.0).abs() < 0.5);
     }
 }

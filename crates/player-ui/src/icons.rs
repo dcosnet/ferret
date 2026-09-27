@@ -474,3 +474,28 @@ pub fn shuffle(painter: &Painter, rect: Rect, color: Color32, active: bool) {
         Stroke::new(thick, col),
     );
 }
+
+/// Queue/playlist icon — three stacked lines of decreasing length with a
+/// leading bullet each (VLC-style playlist glyph). Used by the control-bar
+/// button that toggles the queue sidebar.
+pub fn queue(painter: &Painter, rect: Rect, color: Color32) {
+    let size = rect.height().min(rect.width()) * 0.6;
+    let cx = rect.center().x;
+    let cy = rect.center().y;
+    let line_thick = size * 0.12;
+    let gap = size * 0.28;
+    let bullet_r = size * 0.09;
+    for (offset, shrink) in [(-1.0_f32, 0.0_f32), (0.0, 0.15), (1.0, 0.3)] {
+        let y = cy + offset * gap;
+        // Leading bullet.
+        let bx = cx - size * 0.32;
+        painter.circle_filled(Pos2::new(bx, y), bullet_r, color);
+        // Line of decreasing length.
+        let x0 = bx + size * 0.18;
+        let x1 = cx + size * 0.42 - shrink * size * 0.5;
+        painter.line_segment(
+            [Pos2::new(x0, y), Pos2::new(x1, y)],
+            Stroke::new(line_thick, color),
+        );
+    }
+}

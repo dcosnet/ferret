@@ -53,6 +53,14 @@ const PROP_AB_LOOP_B: EventId = 12;
 const PROP_AID: EventId = 13;
 const PROP_SID: EventId = 14;
 const PROP_SUB_VISIBILITY: EventId = 15;
+const PROP_VO_CONFIGURED: EventId = 16;
+const PROP_PLAYLIST_COUNT: EventId = 17;
+const PROP_PLAYLIST_POS: EventId = 18;
+const PROP_VIDEO_ZOOM: EventId = 19;
+const PROP_VIDEO_PAN_X: EventId = 20;
+const PROP_VIDEO_PAN_Y: EventId = 21;
+const PROP_VIDEO_WIDTH: EventId = 22;
+const PROP_VIDEO_HEIGHT: EventId = 23;
 
 /// The engine. Construct with `PlayerEngine::new()`, then `start()`, then
 /// issue commands via `send()`. Consume events via `take_event_receiver()`.
@@ -251,6 +259,29 @@ fn engine_main(
         // Subtitle visibility — when false, subtitles are hidden even if a
         // track is selected. (mpv `sub-visibility`.)
         (PROP_SUB_VISIBILITY, "sub-visibility", Format::Flag),
+        // Video output health. Flips true once mpv has actually initialized
+        // a VO and presented a frame; if it stays false after a file loads,
+        // the VO failed (no GL context, bad driver, ...) and the UI can warn
+        // the user instead of showing a silent black window.
+        (PROP_VO_CONFIGURED, "vo-configured", Format::Flag),
+        // Queue/playlist size — fires when entries are added or removed,
+        // prompting a full re-enumeration of playlist/N/filename (see
+        // `refresh_playlist`). Reorders don't change the count, so the
+        // Playlist* commands also refresh explicitly.
+        (PROP_PLAYLIST_COUNT, "playlist-count", Format::Int64),
+        // Currently-playing queue index — changes as playback advances
+        // through the queue, and when the user jumps to another entry.
+        (PROP_PLAYLIST_POS, "playlist-playing-pos", Format::Int64),
+        // Video zoom / pan — the movable-object-on-a-canvas controls. Zoom
+        // is log2 units (1 = 2x); pan is screen fractions. Observed so the
+        // state mirror stays true even if mpv changes them itself.
+        (PROP_VIDEO_ZOOM, "video-zoom", Format::Double),
+        (PROP_VIDEO_PAN_X, "video-pan-x", Format::Double),
+        (PROP_VIDEO_PAN_Y, "video-pan-y", Format::Double),
+        // Source video dimensions — needed to map the on-screen zoom/pan
+        // focus area back to source pixels for the A-B clip export.
+        (PROP_VIDEO_WIDTH, "width", Format::Int64),
+        (PROP_VIDEO_HEIGHT, "height", Format::Int64),
     ];
     for (tag, name, fmt) in observed {
         if let Err(e) = mpv.observe_property(tag, name, fmt) {
@@ -514,6 +545,42 @@ fn apply_cmd(mpv: &MpvHandle, bus: &EngineEventBus, cmd: &Cmd) -> CoreResult<()>
             mpv.command(&cmd)?;
             Ok(())
         }
+        Cmd::PlaylistMove { from, to } => {
+            let count = mpv.get_property_i64("playlist-count").unwrap_or(0).max(0) as usize;
+            let from = (*from).min(count.saturating_sub(1));
+            let to = (*to).min(count);
+            if from != to {
+                let cmd = mpv_bindings::command::Command::new()
+                    .arg("playlist-move")?
+                    .arg(from.to_string())?
+                    .arg(to.to_string())?;
+                mpv.command(&cmd)?;
+                // playlist-count doesn't change on a move, so the observer
+                // won't fire — refresh the mirror explicitly.
+                refresh_playlist(mpv, bus);
+            }
+            Ok(())
+        }
+        Cmd::PlaylistRemove { index } => {
+            let count = mpv.get_property_i64("playlist-count").unwrap_or(0).max(0) as usize;
+            if *index < count {
+                let cmd = mpv_bindings::command::Command::new()
+                    .arg("playlist-remove")?
+                    .arg(index.to_string())?;
+                mpv.command(&cmd)?;
+                // The count observer fires on removal too, but refreshing
+                // here keeps the UI in the same frame as the click.
+                refresh_playlist(mpv, bus);
+            }
+            Ok(())
+        }
+        Cmd::PlaylistPlayIndex { index } => {
+            let cmd = mpv_bindings::command::Command::new()
+                .arg("playlist-play-index")?
+                .arg(index.to_string())?;
+            mpv.command(&cmd)?;
+            Ok(())
+        }
 
         // ---- Speed ------------------------------------------------------
 
@@ -597,6 +664,69 @@ fn apply_cmd(mpv: &MpvHandle, bus: &EngineEventBus, cmd: &Cmd) -> CoreResult<()>
             apply_vf_toggle(mpv, "vflip", *enable)?;
             bus.update_state(|s| s.video_flip_v = *enable);
             bus.send(EngineEvent::StateChanged);
+            Ok(())
+        }
+
+        // ---- Video zoom / pan --------------------------------------------
+
+        Cmd::SetVideoZoom(v) => {
+            let v = crate::cmd::clamp_video_zoom(*v);
+            mpv.set_property(&Property::double("video-zoom", v as f64))?;
+            bus.update_state(|s| s.video_zoom = v);
+            bus.send(EngineEvent::StateChanged);
+            Ok(())
+        }
+        Cmd::AdjustVideoZoom(d) => {
+            let cur = bus.snapshot().video_zoom;
+            let v = crate::cmd::clamp_video_zoom(cur + *d);
+            mpv.set_property(&Property::double("video-zoom", v as f64))?;
+            bus.update_state(|s| s.video_zoom = v);
+            bus.send(EngineEvent::StateChanged);
+            Ok(())
+        }
+        Cmd::SetVideoPan { x, y } => {
+            let x = crate::cmd::clamp_video_pan(*x);
+            let y = crate::cmd::clamp_video_pan(*y);
+            mpv.set_property(&Property::double("video-pan-x", x as f64))?;
+            mpv.set_property(&Property::double("video-pan-y", y as f64))?;
+            bus.update_state(|s| {
+                s.video_pan_x = x;
+                s.video_pan_y = y;
+            });
+            bus.send(EngineEvent::StateChanged);
+            Ok(())
+        }
+        Cmd::AdjustVideoPan { dx, dy } => {
+            let (px, py) = {
+                let st = bus.snapshot();
+                (st.video_pan_x, st.video_pan_y)
+            };
+            let x = crate::cmd::clamp_video_pan(px + *dx);
+            let y = crate::cmd::clamp_video_pan(py + *dy);
+            if x != px {
+                mpv.set_property(&Property::double("video-pan-x", x as f64))?;
+            }
+            if y != py {
+                mpv.set_property(&Property::double("video-pan-y", y as f64))?;
+            }
+            bus.update_state(|s| {
+                s.video_pan_x = x;
+                s.video_pan_y = y;
+            });
+            bus.send(EngineEvent::StateChanged);
+            Ok(())
+        }
+        Cmd::ResetVideoPanZoom => {
+            mpv.set_property(&Property::double("video-zoom", 0.0))?;
+            mpv.set_property(&Property::double("video-pan-x", 0.0))?;
+            mpv.set_property(&Property::double("video-pan-y", 0.0))?;
+            bus.update_state(|s| {
+                s.video_zoom = 0.0;
+                s.video_pan_x = 0.0;
+                s.video_pan_y = 0.0;
+            });
+            bus.send(EngineEvent::StateChanged);
+            info!("video zoom/pan reset");
             Ok(())
         }
 
@@ -814,6 +944,10 @@ fn handle_mpv_event(event: &MpvEvent, bus: &EngineEventBus, mpv: &MpvHandle) {
             });
             // Refresh audio tracks — track-list/count may not have fired yet.
             refresh_audio_tracks(mpv, bus);
+            // Same for the queue: the first loadfile replaces the (empty)
+            // playlist, later ones append; either way the mirror should be
+            // correct the moment the file comes up.
+            refresh_playlist(mpv, bus);
             bus.send(EngineEvent::FileLoaded { path, title });
         }
         MpvEvent::EndFile { reason, error } => {
@@ -831,10 +965,13 @@ fn handle_mpv_event(event: &MpvEvent, bus: &EngineEventBus, mpv: &MpvHandle) {
             bus.send(EngineEvent::EndReached { reason: r });
         }
         MpvEvent::PropertyChange { reply_userdata, name, value } => {
-            let (changed, want_track_refresh) =
+            let (changed, want_track_refresh, want_playlist_refresh) =
                 apply_property_change(bus, *reply_userdata, name, value);
             if want_track_refresh {
                 refresh_audio_tracks(mpv, bus);
+            }
+            if want_playlist_refresh {
+                refresh_playlist(mpv, bus);
             }
             if changed {
                 bus.send(EngineEvent::StateChanged);
@@ -874,15 +1011,17 @@ fn apply_property_change(
     tag: EventId,
     name: &str,
     value: &mpv_bindings::event::PropertyValue,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
     use mpv_bindings::event::PropertyValue as V;
     let mut changed = true;
     let mut want_track_refresh = false;
+    let mut want_playlist_refresh = false;
     bus.update_state(|s| {
         match (tag, value) {
             (PROP_TIME_POS, V::Double(d)) => s.time_pos = Some(*d),
             (PROP_DURATION, V::Double(d)) => s.duration = Some(*d),
             (PROP_PAUSE, V::Flag(b)) => s.paused = *b,
+            (PROP_VO_CONFIGURED, V::Flag(b)) => s.vo_configured = *b,
             (PROP_VOLUME, V::Double(d)) => s.volume = (*d as f32 / 100.0).clamp(0.0, 1.0),
             (PROP_MUTE, V::Flag(b)) => s.muted = *b,
             (PROP_PATH, V::String(s2)) => s.path = Some(s2.clone()),
@@ -898,6 +1037,18 @@ fn apply_property_change(
                 want_track_refresh = true;
                 changed = false;
             }
+            // Queue size changed — re-enumerate the playlist mirror.
+            // refresh_playlist() does the actual state update.
+            (PROP_PLAYLIST_COUNT, V::Int64(_)) => {
+                want_playlist_refresh = true;
+                changed = false;
+            }
+            (PROP_PLAYLIST_POS, V::Int64(i)) => s.playlist_pos = *i,
+            (PROP_VIDEO_ZOOM, V::Double(d)) => s.video_zoom = *d as f32,
+            (PROP_VIDEO_PAN_X, V::Double(d)) => s.video_pan_x = *d as f32,
+            (PROP_VIDEO_PAN_Y, V::Double(d)) => s.video_pan_y = *d as f32,
+            (PROP_VIDEO_WIDTH, V::Int64(w)) => s.video_width = (*w).max(0) as u32,
+            (PROP_VIDEO_HEIGHT, V::Int64(h)) => s.video_height = (*h).max(0) as u32,
             (PROP_AB_LOOP_A, V::Double(d)) => s.marker_a = Some(*d),
             (PROP_AB_LOOP_A, V::String(st)) => {
                 // mpv returns "no" when ab-loop-a is unset, or a number string.
@@ -928,6 +1079,9 @@ fn apply_property_change(
                     PROP_AB_LOOP_B => s.marker_b = None,
                     PROP_AID => s.current_audio_track = None,
                     PROP_SID => s.current_subtitle_track = None,
+                    PROP_PLAYLIST_POS => s.playlist_pos = -1,
+                    PROP_VIDEO_WIDTH => s.video_width = 0,
+                    PROP_VIDEO_HEIGHT => s.video_height = 0,
                     _ => changed = false,
                 }
             }
@@ -937,7 +1091,7 @@ fn apply_property_change(
         }
     });
     let _ = name;
-    (changed, want_track_refresh)
+    (changed, want_track_refresh, want_playlist_refresh)
 }
 
 /// Enumerate every track (audio + sub) by walking `track-list/N/*`
@@ -973,6 +1127,33 @@ fn refresh_audio_tracks(mpv: &MpvHandle, bus: &EngineEventBus) {
         s.subtitle_tracks = subs;
         s.current_audio_track = cur_audio;
         s.current_subtitle_track = cur_sub;
+    });
+    bus.send(EngineEvent::StateChanged);
+}
+
+/// Mirror mpv's playlist (the queue) into the shared state snapshot.
+/// Called whenever the playlist changes shape (count observer, FileLoaded)
+/// and explicitly after PlaylistMove/PlaylistRemove — a reorder keeps the
+/// count constant, so the observer alone would miss it.
+fn refresh_playlist(mpv: &MpvHandle, bus: &EngineEventBus) {
+    let Some(count) = mpv.get_property_i64("playlist-count").ok() else {
+        return;
+    };
+    let count = count.max(0);
+    let mut entries = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        // Keep index alignment with mpv even if an entry fails to read.
+        let name = mpv
+            .get_property_string(&format!("playlist/{i}/filename"))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        entries.push(name);
+    }
+    let pos = mpv.get_property_i64("playlist-playing-pos").unwrap_or(-1);
+    bus.update_state(|s| {
+        s.playlist = entries;
+        s.playlist_pos = pos;
     });
     bus.send(EngineEvent::StateChanged);
 }

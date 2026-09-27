@@ -62,6 +62,12 @@ pub struct PlaybackState {
     pub duration: Option<f64>,
     /// Is playback currently paused?
     pub paused: bool,
+
+    /// Whether mpv has initialized a video output and presented at least
+    /// one frame (`vo-configured`). When a file is loaded but this stays
+    /// false, the VO failed — the UI warns the user instead of showing a
+    /// silent black window.
+    pub vo_configured: bool,
     /// Volume 0..=1 (clamped). Mapped 1:1 with libmpv's 0..=100.
     pub volume: f32,
     /// Muted?
@@ -94,6 +100,24 @@ pub struct PlaybackState {
     /// Is vertical flip (upside-down) enabled? Tracked locally.
     pub video_flip_v: bool,
 
+    /// Video zoom in log2 units (mpv `video-zoom`): 0 = fit-to-window,
+    /// 1.0 = 2×, -1.0 = ½×. Combined with the pan fields this lets the
+    /// user treat the video as a movable object on a canvas to realign a
+    /// focus area.
+    pub video_zoom: f32,
+    /// Video pan in screen-fraction units (mpv `video-pan-x`).
+    /// Positive moves the video right.
+    pub video_pan_x: f32,
+    /// Video pan in screen-fraction units (mpv `video-pan-y`).
+    /// Positive moves the video down.
+    pub video_pan_y: f32,
+
+    /// Source video dimensions in pixels (mpv `width` / `height`).
+    /// 0 = unknown / no file loaded. Needed to map the on-screen zoom/pan
+    /// focus area back to source pixels when exporting an A-B clip.
+    pub video_width: u32,
+    pub video_height: u32,
+
     /// A/B marker positions in seconds. None = not set.
     /// Mirrored to mpv's `ab-loop-a` / `ab-loop-b` so mpv itself can drive
     /// the looping; we cache them here for UI rendering.
@@ -104,6 +128,15 @@ pub struct PlaybackState {
 
     /// Current random/shuffle mode. Mirrors the engine's last `SetRandomMode` cmd.
     pub random_mode: RandomMode,
+
+    /// The mpv playlist (the queue), in play order. One entry per queued
+    /// file — the exact string passed to `loadfile` (an absolute path for
+    /// local files). Mirrored from mpv's `playlist/N/filename` properties;
+    /// kept in `PlaybackState` so the UI can render/reorder/save the queue.
+    pub playlist: Vec<String>,
+    /// Index into `playlist` of the currently-playing entry, or -1 when
+    /// nothing is playing. Mirrors mpv's `playlist-playing-pos`.
+    pub playlist_pos: i64,
 }
 
 // Serialize Track for the JSON marker export. We do it manually so the
