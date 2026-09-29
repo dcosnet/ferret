@@ -968,8 +968,11 @@ impl OverlayApp {
                                     }
                                     ui.separator();
                                     ui.label(
-                                        egui::RichText::new("ferret 1.2.0")
-                                            .color(fg_dim).size(10.0),
+                                        egui::RichText::new(format!(
+                                            "ferret {}",
+                                            env!("CARGO_PKG_VERSION")
+                                        ))
+                                        .color(fg_dim).size(10.0),
                                     );
                                     ui.label(
                                         egui::RichText::new("GPL-2.0-or-later")
@@ -1256,7 +1259,7 @@ impl OverlayApp {
                                     .strong(),
                             );
                             ui.label(
-                                egui::RichText::new("1.2.0")
+                                egui::RichText::new(env!("CARGO_PKG_VERSION"))
                                     .color(fg_dim)
                                     .size(13.0),
                             );

@@ -1,7 +1,7 @@
 //! ferret — main binary.
 //!
 //! Architecture:
-//!   1. Parse CLI args (just the file path).
+//!   1. Parse CLI args (file path; `--version` / `--help` exit early).
 //!   2. Create winit event loop (single event loop, multiple windows).
 //!   3. Create the "video window" — a plain winit window we hand to libmpv
 //!      via the `wid` option (X11 only today; Wayland waits on the libmpv
@@ -80,6 +80,31 @@ fn main() -> Result<()> {
     }
 
     let args: Vec<String> = std::env::args().collect();
+    // Early-exit flags. Checked before anything graphical so `ferret --version`
+    // works headless — the bug-report template in CONTRIBUTING.md relies on it.
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("ferret {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                print!(
+                    "ferret {} — a modern, accuracy-first video player for Linux\n\n\
+                     Usage: ferret [FILE]\n\n\
+                     Options:\n  \
+                     --version, -V   print version and exit\n  \
+                     --help, -h      print this help and exit\n\n\
+                     The optional FILE is loaded at startup; without it ferret\n\
+                     opens empty (use File → Load File...).\n\n\
+                     Website: http://git.dcos.net/dcosnet/ferret\n",
+                    env!("CARGO_PKG_VERSION")
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     let file_path = if args.len() >= 2 {
         Some(args[1].clone())
     } else {

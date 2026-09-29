@@ -108,8 +108,8 @@ sudo apt install ffmpeg
 sudo dnf install ffmpeg
 ```
 
-ffmpeg is only needed for **File → Export A-B Loop Video...**. If you don't
-plan to use that feature, you can skip it.
+ffmpeg is only needed for **Playback → Export A-B Loop Video...**. If you
+don't plan to use that feature, you can skip it.
 
 File dialogs are built into the UI — no zenity, kdialog, or rfd required.
 
@@ -124,7 +124,10 @@ File dialogs are built into the UI — no zenity, kdialog, or rfd required.
 You should see:
 
 1. A dark grey window (1280×720 by default)
-2. A menu bar at the top-left: **File Playback Subtitles Video Help** + a status line
+2. A menu bar at the top-left: **File Playback Audio* Subtitles Video Help**
+   plus a status line (the Audio menu appears once a file with audio tracks
+   is loaded). The menu bar and control bar auto-hide after ~3 seconds
+   without input — move the mouse to bring them back.
 3. The video starts playing immediately
 
 If you launch with no arguments:
@@ -160,7 +163,7 @@ A/B markers:
 2. Press `[` to set marker A.
 3. Play to the end of the segment.
 4. Press `]` to set marker B.
-5. Click **File → Export A-B Loop Video...**
+5. Click **Playback → Export A-B Loop Video...**
 6. The in-UI file browser opens — pick where to save the clip.
 7. ffmpeg runs in the background and renders the segment.
 

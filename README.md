@@ -3,7 +3,7 @@
 **A modern, accuracy-first video player for Linux, written in Rust.**
 
 [![License: GPL-2.0](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-orange.svg)](#)
+[![Version](https://img.shields.io/badge/version-1.3.0-orange.svg)](#)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 
 ![ferret](./ferret-ss.png)
@@ -16,6 +16,11 @@ thread; the UI never blocks playback. File dialogs are drawn inside the overlay
 - **Author:** Jeremy Anderson
 - **Website:** http://git.dcos.net/dcosnet/ferret
 - **License:** GPL-2.0-or-later
+
+**Versioning:** the single source of truth is `version` in the workspace
+`Cargo.toml`. The Help menu, the About panel, and `ferret --version` all read
+it at compile time via `CARGO_PKG_VERSION` — bump the version there and every
+surface updates; nothing is hardcoded.
 
 ---
 
@@ -95,8 +100,10 @@ stutter because the engine has no knowledge of the UI.
 **Two-window model:** libmpv renders directly into the video window via X11
 `wid` embedding. The overlay window is transparent, borderless, and
 `AlwaysOnTop` — it covers the video window and renders the UI with egui + wgpu.
-Mouse clicks outside the control bar don't pass through (known limitation;
-fix requires the libmpv render-context API — on the roadmap).
+An X11 bounding shape is applied over exactly the rects egui painted, so
+pointer events over the video area (the "holes") fall through to the video
+window — enabling the drag-to-pan gesture and Ctrl+Wheel zoom — while the
+overlay still forwards them for hover/auto-show behavior.
 
 **X11 background pixel:** the video window's X11 background pixel is set to
 `#141416` via `XSetWindowBackground` before libmpv attaches. This prevents the
@@ -127,27 +134,51 @@ to avoid egui color-management warnings. Alpha mode is `Auto`.
 
 ### Speed Control
 
-- **Presets** — 0.25×, 0.50×, 0.75×, 1.00×, 1.25×, 1.50×, 2.00×, 3.00×, 4.00× (menu)
 - **Quick presets** — 0.50×, 1.00×, 1.50×, 2.00× (control bar buttons)
-- **Fine slider** — 0.25× to 4.0× in 0.01 increments (control bar)
+- **Fine slider** — 0.25× to 4.0× (control bar slider)
 - **Keyboard** — `-` / `=` nudge by 0.25×
+- **Menu steps** — Playback → Speed offers ±0.25× steps only; no discrete
+  preset entries (the slider already covers the full range)
 
 ### A/B Markers
 
 - **Set A / Set B** — drop markers at current playback position
 - **Marker pins** — drawn on the seek bar (red `#FF6464` for A, blue `#64B4FF` for B)
-- **Toggle A-B Loop** — loop between markers (mpv's `ab-loop-a` / `ab-loop-b`)
+- **A-B Loop** — loop between markers (mpv's `ab-loop-a` / `ab-loop-b`)
 - **Export A-B Loop Video** — renders the segment to a new file via ffmpeg
 - **Import/Export Markers** — save/load marker positions as `.txt` or `.json`
+
+All marker controls live in the **Playback** menu (Loop and A-B Markers
+sections) and the control bar's marker buttons.
+
+### Random / Shuffle
+
+- **Modes** — Off / Same Folder / Whole Tree / Step-Aware (Playback → Random/Shuffle)
+- **Random Next** (`R`) — jump to a random entry per the current mode
+- **Cycle mode** (`S`, or the shuffle button in the control bar)
+
+### Queue Sidebar
+
+- Persistent right-hand panel showing the playlist in play order
+  (File → Window → Queue Sidebar, or the queue button in the control bar)
+- **Reorder** — drag-and-drop rows, or click a row's number and type a new
+  1-based position
+- **Click to play**, × to remove, **Save As** writes the queue — in the exact
+  order shown — to an `.m3u` file
+
+### Video Zoom / Pan
+
+- **Ctrl+Wheel** — zoom in/out on the video
+- **Drag the video** — pan while zoomed
+- **Video → Zoom / Pan** — menu steps + reset, with a live zoom/pan readout
 
 ### File Menu
 
 - **Load File** — in-UI file browser (media extensions filtered)
 - **Load Folder** — enumerate video files in a folder as a playlist
 - **Load Playlist** — multi-select files (media + `.m3u`/`.m3u8`/`.pls`)
-- **Export A-B Loop Video** — ffmpeg-rendered clip (MP4/MKV/WebM)
-- **Import Markers** — load saved A/B positions from `.txt` or `.json`
-- **Toggle Fullscreen**
+- **Save Playlist As** — write the current queue to an `.m3u` file
+- **Toggle Fullscreen** — also the Queue Sidebar toggle under Window
 - **Quit**
 
 ### Subtitles
@@ -168,6 +199,7 @@ to avoid egui color-management warnings. Alpha mode is `Auto`.
 - **Rotation** — 0°, 90°, 180°, 270° (mpv `video-rotate` property)
 - **Flip Horizontal** — mirror left-right (mpv `vf` filter `hflip`)
 - **Flip Vertical** — upside-down (mpv `vf` filter `vflip`)
+- **Zoom / Pan** — Ctrl+Wheel zoom, drag-to-pan, menu reset (see above)
 
 ### In-UI File Browser
 
@@ -263,6 +295,11 @@ ferret /path/to/video.mp4
 Or launch with no arguments to get an empty dark grey window with the menu
 bar — use **File → Load File...** to open the in-UI file browser.
 
+```bash
+ferret --version    # print version (reads Cargo.toml at compile time)
+ferret --help       # usage summary
+```
+
 ---
 
 ## Keyboard Shortcuts
@@ -274,24 +311,30 @@ the shortcut in parentheses (e.g. `Play / Pause  (Space)`).
 |-----|--------|----------------|
 | Space | Play / pause | Playback menu, ▶/⏸ button |
 | Q | Quit | File menu |
-| F | Toggle fullscreen | File menu, ⛶ button |
+| F | Toggle fullscreen | File → Window, ⛶ button |
 | M | Toggle mute | Playback → Volume, 🔊 button |
 | ← / → | Seek -5s / +5s (keyframes) | Playback → Seek |
 | ↑ / ↓ | Volume +5% / -5% | Playback → Volume |
 | , / . | Frame-step back / forward | Playback → Seek, ◀| / |▶ buttons |
-| [ / ] | Set A / B marker | File menu, A/B buttons |
-| \\ | Clear markers | File menu |
+| [ / ] | Set A / B marker | Playback → A-B Markers, A/B buttons |
+| \\ | Clear markers | Playback → A-B Markers |
 | L | Cycle loop mode (off/file/list) | Playback → Loop, ⟳ button |
 | - / = | Speed -0.25× / +0.25× | Playback → Speed, slider |
 | N / P | Playlist next / previous | Playback → Playlist, ⏭/⏮ buttons |
+| R | Random next | Playback → Random/Shuffle, 🔀 button |
+| S | Cycle random mode (off/folder/tree/step) | Playback → Random/Shuffle, 🔀 button |
 | V | Toggle subtitle visibility | Subtitles menu |
+
+**Mouse gestures:** Ctrl+Wheel zooms the video in/out; dragging the video
+pans while zoomed. The plain wheel is currently unused.
 
 ---
 
 ## Menu Reference
 
-The menu bar is always visible at the top-left, even when the bottom control
-bar has auto-hidden.
+The menu bar and the control bar auto-hide together after ~3 seconds without
+input; moving the mouse over the window brings both back. While a dropdown,
+dialog, or panel is open, nothing auto-hides.
 
 ### File menu
 
@@ -300,13 +343,9 @@ bar has auto-hidden.
 | Load File... | — | Open |
 | Load Folder... | — | Open |
 | Load Playlist... | — | Open |
-| Set A Marker | `[` | Markers |
-| Set B Marker | `]` | Markers |
-| Clear Markers | `\\` | Markers |
-| Toggle A-B Loop | — | Markers |
-| Export A-B Loop Video... | — | Markers |
-| Import Markers... | — | Markers |
+| Save Playlist As... | — | Open |
 | Toggle Fullscreen | `F` | Window |
+| Queue Sidebar | — | Window |
 | Quit | `Q` | — |
 
 ### Playback menu
@@ -326,9 +365,20 @@ bar has auto-hidden.
 | Toggle Mute | M | Volume |
 | Off / Loop File / Loop Playlist | — | Loop |
 | Cycle Loop Mode | L | Loop |
+| A-B Loop (toggle) | — | Loop |
+| Set A Marker | `[` | A-B Markers |
+| Set B Marker | `]` | A-B Markers |
+| Clear Markers | `\\` | A-B Markers |
+| Export A-B Loop Video... | — | A-B Markers |
+| Import Markers... | — | A-B Markers |
+| Off / Same Folder / Whole Tree / Step-Aware | — | Random / Shuffle |
+| Random Next | R | Random / Shuffle |
+| Cycle Random Mode | S | Random / Shuffle |
 | Speed Up +0.25× | = | Speed |
 | Speed Down -0.25× | - | Speed |
-| 0.25× through 4.0× presets | — | Speed |
+
+The Speed section intentionally has no discrete preset entries — the
+control-bar slider covers the full 0.25×–4× range continuously.
 
 ### Audio menu
 
@@ -348,18 +398,23 @@ Appears only when the loaded file has audio tracks.
 
 - **Rotate:** 0° (normal), 90°, 180°, 270°
 - **Flip:** Flip Horizontal (mirror), Flip Vertical (upside-down)
+- **Zoom / Pan:** Zoom In (Ctrl+Wheel), Zoom Out, Reset Zoom & Pan, live
+  zoom/pan readout
 
 ### Help menu
 
 - **About ferret** — toggles the About panel (version, author, license)
-- Version: `ferret 1.0.0`
+- Version: from `Cargo.toml` via `CARGO_PKG_VERSION` — also visible with
+  `ferret --version`
 - License: `GPL-2.0-or-later`
 
 ---
 
 ## Control Bar
 
-The bottom control bar (118px tall) has three rows:
+The bottom control bar (118px tall) has three rows. A status line next to the
+menu bar mirrors playback state (playing/paused, speed, loop mode, random
+mode, zoom/pan).
 
 ### Row 1 — Seek bar
 - Current time label (monospace)
@@ -368,6 +423,7 @@ The bottom control bar (118px tall) has three rows:
 
 ### Row 2 — Transport | time | volume + fullscreen
 - Play/Pause, Stop, Previous, Next, Frame Back, Frame Forward
+- Shuffle button (cycles random mode), Queue sidebar toggle
 - Center: `MM:SS / MM:SS` time display
 - Right: Fullscreen button, Volume slider, Volume/mute icon
 
@@ -385,21 +441,21 @@ The bottom control bar (118px tall) has three rows:
 ### Setting Markers
 
 1. Play to the point where you want marker A.
-2. Press `[` (or click **File → Set A Marker**).
+2. Press `[` (or click **Playback → Set A Marker**).
 3. Play to the point where you want marker B.
-4. Press `]` (or click **File → Set B Marker**).
+4. Press `]` (or click **Playback → Set B Marker**).
 
 The markers appear as colored pins on the seek bar — red for A, blue for B.
 
 ### Looping A→B
 
 When both markers are set, mpv automatically loops between them. The
-**Toggle A-B Loop** menu item (or the AB-loop button in the control bar)
+**A-B Loop** menu item (or the AB-loop button in the control bar)
 turns this on/off. When toggled off, the markers are cleared.
 
 ### Exporting the A-B Loop
 
-**File → Export A-B Loop Video...** opens the in-UI save dialog, then runs
+**Playback → Export A-B Loop Video...** opens the in-UI save dialog, then runs
 ffmpeg to extract the segment:
 
 ```bash
@@ -552,15 +608,33 @@ There is no config file yet (planned for a future release).
 - wgpu surface error recovery + forced `PresentMode::Fifo`
 - CI tooling: bracket audit, deref audit, clippy config
 
+### Done (v1.3)
+
+- Queue sidebar — playlist panel with drag-drop reorder, type-a-position
+  reorder, click-to-play, per-entry removal, Save As `.m3u`
+- Random / shuffle playback — Off / Same Folder / Whole Tree / Step-Aware
+  modes, `R` / `S` keys, shuffle button
+- Video zoom / pan — Ctrl+Wheel zoom, drag-to-pan, menu reset
+- Save Playlist As `.m3u` from the File menu
+- A-B controls consolidated under the Playback menu; discrete speed preset
+  entries removed (slider covers 0.25×–4×)
+- Self-sustaining ~30fps UI repaint ticker — no more frozen/black UI until
+  the mouse moves, and auto-hide works with zero input
+- X11 input shape on the overlay — pointer events over the video reach the
+  video window (pan gesture, zoom wheel) while hover/auto-show still work
+- VO health check — visible warning if the video output fails to initialize
+  instead of a silent black window
+- Version now single-sourced from `Cargo.toml` (Help menu, About panel,
+  `ferret --version`)
+
 ### Planned
 
 1. **Wayland support** via `mpv_render_context` + `MPV_RENDER_API_TYPE_OPENGL`.
    Eliminates the wid/X11 dependency, unblocks macOS (Metal via wgpu) and
    Windows (DX12 via wgpu).
 2. **Config file** (`~/.config/ferret/ferret.toml`).
-3. **Playlist UI** — drag-drop, reorder, repeat, shuffle.
-4. **Media keys** (MPRIS on Linux).
-5. **Single-window compositing** — render video as a wgpu texture inside egui,
+3. **Media keys** (MPRIS on Linux).
+4. **Single-window compositing** — render video as a wgpu texture inside egui,
    eliminating the second window and the click-through limitation.
 
 ---
